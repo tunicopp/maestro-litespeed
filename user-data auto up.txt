@@ -1,0 +1,123 @@
+#!/usr/bin/env bash
+set -euxo pipefail
+
+# === Amazon Linux 2023 :: Docker (binários estáticos) + Compose v2 + Git ===
+
+# Pacotes base
+dnf -y update
+dnf -y install tar xz unzip jq ca-certificates iptables iproute git
+
+# Detecta arquitetura
+ARCH="$(uname -m)"
+case "$ARCH" in
+  x86_64)   DOCKER_ARCH="x86_64" ;;
+  aarch64|arm64) DOCKER_ARCH="aarch64" ;;
+  *) echo "Arquitetura não suportada: $ARCH"; exit 1 ;;
+esac
+
+DOCKER_VER="27.0.3"
+COMPOSE_VER="v2.27.0"
+
+# Baixa e instala os binários estáticos do Docker
+cd /tmp
+curl -fsSL "https://download.docker.com/linux/static/stable/${DOCKER_ARCH}/docker-${DOCKER_VER}.tgz" -o docker.tgz
+tar -xzf docker.tgz
+
+install -m0755 docker/dockerd                 /usr/local/bin/dockerd
+install -m0755 docker/docker                  /usr/local/bin/docker
+install -m0755 docker/containerd              /usr/local/bin/containerd
+install -m0755 docker/containerd-shim-runc-v2 /usr/local/bin/containerd-shim-runc-v2
+install -m0755 docker/ctr                     /usr/local/bin/ctr
+install -m0755 docker/runc                    /usr/local/bin/runc
+
+# Pastas e config do Docker
+mkdir -p /etc/docker /var/lib/docker /run/docker
+
+cat >/etc/docker/daemon.json <<'JSON'
+{
+  "log-driver": "json-file",
+  "log-opts": { "max-size": "10m", "max-file": "3" },
+  "userland-proxy": false
+}
+JSON
+
+# Units systemd
+cat >/etc/systemd/system/containerd.service <<'EOF'
+[Unit]
+Description=containerd container runtime
+Documentation=https://containerd.io
+After=network.target local-fs.target
+[Service]
+Type=notify
+ExecStart=/usr/local/bin/containerd
+KillMode=process
+Delegate=yes
+TasksMax=infinity
+[Install]
+WantedBy=multi-user.target
+EOF
+
+cat >/etc/systemd/system/docker.service <<'EOF'
+[Unit]
+Description=Docker Engine
+Documentation=https://docs.docker.com
+After=network-online.target containerd.service
+Wants=network-online.target containerd.service
+[Service]
+Type=notify
+ExecStart=/usr/local/bin/dockerd --host=unix:///var/run/docker.sock --containerd=/run/containerd/containerd.sock --group docker
+ExecReload=/bin/kill -s HUP $MAINPID
+Restart=always
+RestartSec=2
+Delegate=yes
+LimitNOFILE=1048576
+LimitNPROC=1048576
+TasksMax=infinity
+[Install]
+WantedBy=multi-user.target
+EOF
+
+# containerd config
+mkdir -p /etc/containerd
+containerd config default | sed 's/SystemdCgroup = false/SystemdCgroup = true/' > /etc/containerd/config.toml
+
+# Habilita IP forward
+echo 'net.ipv4.ip_forward = 1' > /etc/sysctl.d/99-docker.conf
+sysctl --system || true
+
+# Grupo docker
+groupadd -f docker
+usermod -aG docker ec2-user || true
+
+# Sobe serviços
+systemctl daemon-reload
+systemctl enable --now containerd
+systemctl enable --now docker
+
+# Compose v2
+mkdir -p /usr/lib/docker/cli-plugins /usr/local/lib/docker/cli-plugins
+curl -fsSL "https://github.com/docker/compose/releases/download/${COMPOSE_VER}/docker-compose-$(uname -s)-$(uname -m)" \
+  -o /usr/lib/docker/cli-plugins/docker-compose
+chmod +x /usr/lib/docker/cli-plugins/docker-compose
+cp /usr/lib/docker/cli-plugins/docker-compose /usr/local/lib/docker/cli-plugins/docker-compose
+ln -sf /usr/lib/docker/cli-plugins/docker-compose /usr/local/bin/docker-compose || true
+
+# Clona o repositório e sobe os containers
+cd /home/ec2-user
+if [ ! -d "maestro" ]; then
+  git clone --branch main https://github.com/tunicopp/maestro.git
+fi
+cd maestro
+docker compose pull || true
+docker compose up -d || true
+
+# Ajusta permissões
+chown -R ec2-user:ec2-user /home/ec2-user/maestro
+
+# Checks
+docker --version || true
+docker info || true
+docker compose version || true
+git --version || true
+
+echo "OK: Docker ${DOCKER_VER} + Compose ${COMPOSE_VER} + Git pronto e projeto 'maestro' iniciado."

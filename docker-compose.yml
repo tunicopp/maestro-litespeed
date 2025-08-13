@@ -1,0 +1,62 @@
+name: wordpress-litespeed
+
+networks:
+  wp_network:
+
+volumes:
+  wp_maestro:
+  wp_maestro_cache:
+  mariadb_data:
+  redis_data:
+
+services:
+  litespeed:
+    build: 
+      context: .
+      dockerfile: Dockerfile
+    container_name: litespeed
+    env_file: .env
+    environment:
+      - LSWS_ADMIN_USER=${LSWS_ADMIN_USER}
+      - LSWS_ADMIN_PASS=${LSWS_ADMIN_PASS}
+    ports:
+      - "80:80"
+      - "443:443"
+      - "7080:7080"
+    volumes:
+      - wp_maestro:/var/www/vhosts/localhost/html
+      #- wp_maestro_cache:/var/www/vhosts/localhost/html/wp-content/cache
+      - ./wordpress/wp-content/cache:/var/www/vhosts/localhost/html/wp-content/cache
+    depends_on:
+      - redis
+    networks:
+      - wp_network
+    profiles: ["dev", "prod"]
+
+  mariadb:
+    image: mariadb:10.11
+    container_name: mariadb
+    env_file: .env
+    environment:
+      MYSQL_ROOT_PASSWORD: rootpass
+      MYSQL_DATABASE: ${WORDPRESS_DB_NAME}
+      MYSQL_USER: ${WORDPRESS_DB_USER}
+      MYSQL_PASSWORD: ${WORDPRESS_DB_PASSWORD}
+    volumes:
+      - mariadb_data:/var/lib/mysql
+    networks:
+      - wp_network
+    profiles: ["dev"]
+
+  redis:
+    image: redis:alpine
+    container_name: redis
+    env_file: .env
+    command: ["redis-server", "--appendonly", "yes", "--requirepass", "${WP_REDIS_PASSWORD}"]
+    environment:
+      REDIS_PASSWORD: ${WP_REDIS_PASSWORD}
+    volumes:
+      - redis_data:/data
+    networks:
+      - wp_network
+    profiles: ["dev", "prod"]
