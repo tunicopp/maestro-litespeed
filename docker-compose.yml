@@ -20,6 +20,7 @@ services:
       - LSWS_ADMIN_USER=${LSWS_ADMIN_USER}
       - LSWS_ADMIN_PASS=${LSWS_ADMIN_PASS}
     ports:
+      - "8080:80"
       - "80:80"
       - "443:443"
       - "7080:7080"

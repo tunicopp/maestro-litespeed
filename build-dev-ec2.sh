@@ -7,7 +7,7 @@ echo "🚀 [PROD] Build & Up (profile: prod) — maestro-litespeed"
 REPO_URL="${REPO_URL:-https://github.com/tunicopp/maestro-litespeed.git}"
 REPO_DIR="${REPO_DIR:-maestro-litespeed}"
 REPO_BRANCH="${REPO_BRANCH:-main}"
-URL_SITE="${URL_SITE:-3.86.92.164}"
+URL_SITE="${URL_SITE:-18.206.164.94}"
 
 # Serviço do docker-compose que atende HTTP
 SERVICE_NAME="${SERVICE_NAME:-litespeed}"
@@ -58,7 +58,7 @@ if [[ "${GIT_PUSH}" = "1" ]]; then
     git add -A
     git commit -m "ci: prod build $(date -u +'%Y-%m-%dT%H:%M:%SZ')"
     # para usar HTTPS com token, exporte GIT_ASKPASS ou use credential helper da máquina
-    git push -u origin "${REPO_BRANCH}"
+    git push -u origin "${REPO_BRANCH}" --force
   else
     echo "ℹ️  Sem mudanças locais para enviar ao Git."
   fi

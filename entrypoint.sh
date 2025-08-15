@@ -136,7 +136,7 @@ ensure_multisite() {
   if [ "$IS_MS" -eq 1 ] && { [ -z "$HAS_BLOGS" ] || [ -z "$HAS_SITE" ]; }; then
     echo "🧩 Detectado MULTISITE sem tabelas de rede. Executando multisite-convert..."
     # Define modo (subdomínios ou subdiretórios) se quiser via env
-    local SUBDOMAIN=${SUBDOMAIN_INSTALL:-false}
+    local SUBDOMAIN=${SUBDOMAIN_INSTALL:-true}
     wp core multisite-convert \
       --title="${NETWORK_TITLE:-Maestro Ecommerce Network}" \
       $( [ "$SUBDOMAIN" = "true" ] && echo --subdomains ) \
@@ -144,7 +144,7 @@ ensure_multisite() {
 
     # 🔐 garante os defines no wp-config.php
     wp config set MULTISITE true --raw --path="$WP_PATH" --allow-root
-    wp config set SUBDOMAIN_INSTALL ${SUBDOMAIN_INSTALL:-false} --raw --path="$WP_PATH" --allow-root
+    wp config set SUBDOMAIN_INSTALL ${SUBDOMAIN_INSTALL:-true} --raw --path="$WP_PATH" --allow-root
 
     echo "🔄 Atualizando DB da rede..."
     wp core update-db --network --allow-root --path="$WP_PATH" || true
@@ -188,12 +188,12 @@ bootstrap_wordpress() {
   echo "🌐 Convertendo para Multisite..."
   wp core multisite-convert \
     --title="${NETWORK_TITLE:-Maestro Ecommerce Network}" \
-    $( [ "${SUBDOMAIN_INSTALL:-false}" = "true" ] && echo --subdomains ) \
+    $( [ "${SUBDOMAIN_INSTALL:-true}" = "true" ] && echo --subdomains ) \
     --allow-root --path="$WP_PATH" || true
 
   # 🔐 garante os defines no wp-config.php
   wp config set MULTISITE true --raw --path="$WP_PATH" --allow-root
-  wp config set SUBDOMAIN_INSTALL ${SUBDOMAIN_INSTALL:-false} --raw --path="$WP_PATH" --allow-root
+  wp config set SUBDOMAIN_INSTALL ${SUBDOMAIN_INSTALL:-true} --raw --path="$WP_PATH" --allow-root
   wp config set DOMAIN_CURRENT_SITE "${DOMAIN_CURRENT_SITE:-$(wp option get siteurl --allow-root --path="$WP_PATH" | sed -E 's#^https?://##')}" --path="$WP_PATH" --allow-root
   wp config set PATH_CURRENT_SITE "/" --path="$WP_PATH" --allow-root
   wp config set SITE_ID_CURRENT_SITE 1 --raw --path="$WP_PATH" --allow-root
@@ -244,7 +244,7 @@ else
     apply_config_extras "$WP_PATH"
     add_dynamic_urls_block "$WP_PATH"
     ensure_htaccess "$WP_PATH"
-    ensure_multisite "$WP_PATH" # <- NOVO
+    ensure_multisite "$WP_PATH"
   fi
 fi
 
