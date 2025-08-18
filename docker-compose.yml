@@ -14,7 +14,8 @@ volumes:
 
 services:
   traefik:
-    image: traefik:v3.5.0-nanoserver-ltsc2022
+    image: traefik:v3.1
+    platform: linux/amd64
     container_name: traefik
     restart: always
     command:
@@ -63,6 +64,7 @@ services:
 
   mariadb:
     image: mariadb:10.11
+    platform: linux/amd64
     container_name: mariadb
     restart: always
     env_file: .env
@@ -79,6 +81,7 @@ services:
 
   redis:
     image: redis:alpine
+    platform: linux/amd64
     container_name: redis
     restart: always
     env_file: .env
@@ -93,29 +96,22 @@ services:
     profiles: ["dev","prod"]
 
   litespeed:
-    # Se preferir imagem oficial:
-    # image: litespeedtech/openlitespeed:1.7.17-lsphp81
-    # Ou mantenha seu Dockerfile custom:
     build:
       context: .
       dockerfile: Dockerfile
+    platform: linux/amd64
     container_name: litespeed
     restart: always
     env_file: .env
     volumes:
       - wp_maestro:/var/www/vhosts/localhost/html
       - wp_maestro_cache:/var/www/vhosts/localhost/cache
-      # Exemplo de ini custom:
-      # - ./config/php.conf.ini:/usr/local/etc/php/conf.d/conf.ini:ro
-
     expose:
       - "8080"  # site/app
       - "7080"  # WebAdmin OLS (interno)
-
     networks:
       - wp_network
       - proxy
-
     labels:
       - traefik.enable=true
 
