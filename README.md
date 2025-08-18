@@ -1,3 +1,7 @@
+### 🗓️ Alteração em 18/08/2025 14:23:16
+- .env
+- docker-compose.yml
+
 ### 🗓️ Alteração em 15/08/2025 16:28:43
 - (sem diff detectado antes do commit)
 
