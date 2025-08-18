@@ -1,3 +1,9 @@
+### 🗓️ Alteração em 18/08/2025 16:34:41
+- .env
+- docker-compose.yml
+- dynamic/middlewares.yml
+- entrypoint.sh
+
 ### 🗓️ Alteração em 18/08/2025 15:47:26
 - .env
 - docker-compose.yml

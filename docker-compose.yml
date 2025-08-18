@@ -1,133 +1,105 @@
-name: wordpress-litespeed
-
-networks:
-  wp_network:
-  proxy:
-    driver: bridge
-
-volumes:
-  traefik_letsencrypt:
-  wp_maestro:
-  wp_maestro_cache:
-  mariadb_data:
-  redis_data:
+version: "3.9"
 
 services:
-  traefik:
-    image: traefik:v3.1
-    platform: linux/amd64
-    container_name: traefik
-    restart: always
-    command:
-      # Entrypoints
-      - --entrypoints.web.address=:80
-      - --entrypoints.websecure.address=:443
-
-      # Descoberta via Docker + labels
-      - --providers.docker=true
-      - --providers.docker.exposedbydefault=false
-
-      # (Opcional) arquivos dinâmicos p/ middlewares/hosts fixos
-      - --providers.file.directory=/dynamic
-      - --providers.file.watch=true
-
-      # ACME 1: wildcard via DNS-01 (Route53)
-      - --certificatesresolvers.le-dns.acme.email=${LE_EMAIL}
-      - --certificatesresolvers.le-dns.acme.storage=/letsencrypt/acme-dns.json
-      - --certificatesresolvers.le-dns.acme.dnschallenge=true
-      - --certificatesresolvers.le-dns.acme.dnschallenge.provider=route53
-
-      # ACME 2: domínios mapeados via HTTP-01
-      - --certificatesresolvers.le-http.acme.email=${LE_EMAIL}
-      - --certificatesresolvers.le-http.acme.storage=/letsencrypt/acme-http.json
-      - --certificatesresolvers.le-http.acme.httpchallenge=true
-      - --certificatesresolvers.le-http.acme.httpchallenge.entrypoint=web
-
-      # Redirect 80 -> 443
-      - --entrypoints.web.http.redirections.entrypoint.to=websecure
-      - --entrypoints.web.http.redirections.entrypoint.scheme=https
-
-    environment:
-      - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID}
-      - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY}
-      - AWS_REGION=${AWS_REGION}
+  litespeed:
+    image: litespeedtech/openlitespeed:1.7.17-lsphp81
+    container_name: litespeed
+    depends_on:
+      - mariadb
+      - redis
     ports:
       - "80:80"
       - "443:443"
+    env_file: ./.env
     volumes:
-      - /var/run/docker.sock:/var/run/docker.sock:ro
-      - traefik_letsencrypt:/letsencrypt
-      - ./dynamic:/dynamic
-    networks:
-      - proxy
-    profiles: ["dev","prod"]
+      # WordPress
+      - wp:/var/www/vhosts/localhost/html
+      # Config do OLS persistente
+      - lsws-conf:/usr/local/lsws/conf
+      # Certificados Let’s Encrypt compartilhados
+      - letsencrypt:/etc/letsencrypt
+      # Seu entrypoint custom
+      - ./entrypoint.sh:/usr/local/bin/entrypoint.sh:ro
+    command: [ "bash", "/usr/local/bin/entrypoint.sh" ]
+    restart: unless-stopped
 
   mariadb:
     image: mariadb:10.11
-    platform: linux/amd64
     container_name: mariadb
-    restart: always
-    env_file: .env
+    env_file: ./.env
     environment:
-      - MARIADB_DATABASE=${WORDPRESS_DB_NAME}
-      - MARIADB_USER=${WORDPRESS_DB_USER}
-      - MARIADB_PASSWORD=${WORDPRESS_DB_PASSWORD}
-      - MARIADB_ROOT_PASSWORD=${MARIADB_ROOT_PASSWORD}
+      - MYSQL_DATABASE=${WORDPRESS_DB_NAME}
+      - MYSQL_USER=${WORDPRESS_DB_USER}
+      - MYSQL_PASSWORD=${WORDPRESS_DB_PASSWORD}
+      - MYSQL_ROOT_PASSWORD=${WORDPRESS_DB_PASSWORD}
     volumes:
-      - mariadb_data:/var/lib/mysql
-    networks:
-      - wp_network
-    profiles: ["dev","prod"]
+      - mariadb-data:/var/lib/mysql
+    restart: unless-stopped
 
   redis:
-    image: redis:alpine
-    platform: linux/amd64
+    image: redis:7-alpine
     container_name: redis
-    restart: always
-    env_file: .env
-    command: ["redis-server", "--appendonly", "yes", "--requirepass", "${WP_REDIS_PASSWORD}"]
-    environment:
-      - REDIS_PASSWORD=${WP_REDIS_PASSWORD}
+    command: ["redis-server","--appendonly","yes","--requirepass","${WP_REDIS_PASSWORD}"]
     volumes:
-      - redis_data:/data
-    networks:
-      - wp_network
-      - proxy
-    profiles: ["dev","prod"]
+      - redis-data:/data
+    restart: unless-stopped
 
-  litespeed:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    platform: linux/amd64
-    container_name: litespeed
-    restart: always
-    env_file: .env
-    volumes:
-      - wp_maestro:/var/www/vhosts/localhost/html
-      - wp_maestro_cache:/var/www/vhosts/localhost/cache
-    expose:
-      - "8080"  # site/app
-      - "7080"  # WebAdmin OLS (interno)
-    networks:
-      - wp_network
-      - proxy
-    labels:
-      - traefik.enable=true
-
-      # ── Router 1 — Multisite (subdomínios *.${DOMAIN_BASE}) via DNS-01/wildcard
-      - "traefik.http.routers.wp-ms.rule=HostRegexp(`{subdomain:.+}.${DOMAIN_BASE}`)"
-      - traefik.http.routers.wp-ms.entrypoints=websecure
-      - traefik.http.routers.wp-ms.tls.certresolver=le-dns
-      - traefik.http.services.wp-ms.loadbalancer.server.port=8080
-
-      # Domínio mapeado específico (fix explícito p/ sair do 404 agora)
-      - "traefik.http.routers.reus.rule=Host(`reusclub.com.br`)"
-      - traefik.http.routers.reus.entrypoints=websecure
-      - traefik.http.routers.reus.tls.certresolver=le-http
-      - traefik.http.routers.reus.priority=10
-      - traefik.http.services.reus.loadbalancer.server.port=8080
-
+  # ——— Certbot via HTTP-01 (webroot) ———
+  certbot:
+    image: certbot/certbot:latest
+    container_name: certbot
+    env_file: ./.env
     depends_on:
-      - mariadb
-    profiles: ["dev","prod"]
+      - litespeed
+    volumes:
+      # O token do ACME vai ser gravado e servido pelo OLS (webroot)
+      - wp:/var/www/vhosts/localhost/html:rw
+      # Onde ficam os certificados emitidos/renovados
+      - letsencrypt:/etc/letsencrypt
+    entrypoint: /bin/sh
+    command: |
+      sh -c '
+        set -e
+        echo "➡️ Emitindo/renovando certificados (HTTP-01 via webroot)..."
+        certbot certonly --webroot \
+          -w /var/www/vhosts/localhost/html \
+          -d ${DOMAIN} ${EXTRA_DOMAINS} \
+          --email ${LE_EMAIL} --agree-tos --non-interactive --keep-until-expiring
+
+        echo "🔁 Iniciando loop de renovação (12h)..."
+        while :; do
+          certbot renew --webroot -w /var/www/vhosts/localhost/html --quiet || true
+          sleep 12h
+        done
+      '
+    restart: unless-stopped
+
+  # ——— ALTERNATIVA: Certbot DNS-01 p/ WILDCARD (exemplo Cloudflare) ———
+  # certbot-dns:
+  #   image: certbot/dns-cloudflare:latest
+  #   container_name: certbot-dns
+  #   env_file: ./.env
+  #   environment:
+  #     - CLOUDFLARE_API_TOKEN=${CLOUDFLARE_API_TOKEN}
+  #   volumes:
+  #     - letsencrypt:/etc/letsencrypt
+  #     - ./cloudflare.ini:/root/.secrets/certbot/cloudflare.ini:ro
+  #   entrypoint: /bin/sh
+  #   command: -c "
+  #     set -e;
+  #     certbot certonly --dns-cloudflare --dns-cloudflare-credentials /root/.secrets/certbot/cloudflare.ini \
+  #       -d ${DOMAIN} -d *.${DOMAIN} \
+  #       --email ${LE_EMAIL} --agree-tos --non-interactive --keep-until-expiring;
+  #     while :; do
+  #       certbot renew --quiet;
+  #       sleep 12h;
+  #     done
+  #   "
+  #   restart: unless-stopped
+
+volumes:
+  wp:
+  mariadb-data:
+  redis-data:
+  lsws-conf:
+  letsencrypt:
