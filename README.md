@@ -1,3 +1,6 @@
+### 🗓️ Alteração em 18/08/2025 14:27:42
+- .env
+
 ### 🗓️ Alteração em 18/08/2025 14:24:23
 - (sem diff detectado antes do commit)
 
