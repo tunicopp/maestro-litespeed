@@ -14,9 +14,9 @@ volumes:
 
 services:
   traefik:
-    image: traefik:v3.1
+    image: traefik:v3.5.0-nanoserver-ltsc2022
     container_name: traefik
-    restart: unless-stopped
+    restart: always
     command:
       # Entrypoints
       - --entrypoints.web.address=:80
@@ -30,24 +30,23 @@ services:
       - --providers.file.directory=/dynamic
       - --providers.file.watch=true
 
-      # ACME - resolver 1 (DNS-01) p/ wildcard (*.DOMAIN_BASE)
-      - --certificatesresolvers.le-dns.acme.dnschallenge=true
-      - --certificatesresolvers.le-dns.acme.dnschallenge.provider=route53
+      # ACME 1: wildcard via DNS-01 (Route53)
       - --certificatesresolvers.le-dns.acme.email=${LE_EMAIL}
       - --certificatesresolvers.le-dns.acme.storage=/letsencrypt/acme-dns.json
+      - --certificatesresolvers.le-dns.acme.dnschallenge=true
+      - --certificatesresolvers.le-dns.acme.dnschallenge.provider=route53
 
-      # ACME - resolver 2 (HTTP-01) p/ domínios mapeados (site1.com.br etc.)
+      # ACME 2: domínios mapeados via HTTP-01
       - --certificatesresolvers.le-http.acme.email=${LE_EMAIL}
       - --certificatesresolvers.le-http.acme.storage=/letsencrypt/acme-http.json
       - --certificatesresolvers.le-http.acme.httpchallenge=true
       - --certificatesresolvers.le-http.acme.httpchallenge.entrypoint=web
 
-      # Redirect HTTP -> HTTPS
+      # Redirect 80 -> 443
       - --entrypoints.web.http.redirections.entrypoint.to=websecure
       - --entrypoints.web.http.redirections.entrypoint.scheme=https
 
     environment:
-      # Token do provedor DNS (Cloudflare) para DNS-01
       - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID}
       - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY}
       - AWS_REGION=${AWS_REGION}
@@ -65,7 +64,7 @@ services:
   mariadb:
     image: mariadb:10.11
     container_name: mariadb
-    restart: unless-stopped
+    restart: always
     env_file: .env
     environment:
       - MARIADB_DATABASE=${WORDPRESS_DB_NAME}
@@ -81,7 +80,7 @@ services:
   redis:
     image: redis:alpine
     container_name: redis
-    restart: unless-stopped
+    restart: always
     env_file: .env
     command: ["redis-server", "--appendonly", "yes", "--requirepass", "${WP_REDIS_PASSWORD}"]
     environment:
@@ -90,6 +89,7 @@ services:
       - redis_data:/data
     networks:
       - wp_network
+      - proxy
     profiles: ["dev","prod"]
 
   litespeed:
@@ -100,7 +100,7 @@ services:
       context: .
       dockerfile: Dockerfile
     container_name: litespeed
-    restart: unless-stopped
+    restart: always
     env_file: .env
     volumes:
       - wp_maestro:/var/www/vhosts/localhost/html
@@ -125,12 +125,12 @@ services:
       - traefik.http.routers.wp-ms.tls.certresolver=le-dns
       - traefik.http.services.wp-ms.loadbalancer.server.port=8080
 
-      # ── Router 2 — Domínios mapeados (site1.com.br, loja-x.com...) via HTTP-01
-      - "traefik.http.routers.wp-map.rule=HostRegexp(`{anydomain:.+}`)"
-      - traefik.http.routers.wp-map.entrypoints=websecure
-      - traefik.http.routers.wp-map.tls.certresolver=le-http
-      - traefik.http.routers.wp-map.priority=1
-      - traefik.http.services.wp-map.loadbalancer.server.port=8080
+      # Domínio mapeado específico (fix explícito p/ sair do 404 agora)
+      - "traefik.http.routers.reus.rule=Host(`reusclub.com.br`)"
+      - traefik.http.routers.reus.entrypoints=websecure
+      - traefik.http.routers.reus.tls.certresolver=le-http
+      - traefik.http.routers.reus.priority=10
+      - traefik.http.services.reus.loadbalancer.server.port=8080
 
     depends_on:
       - mariadb
