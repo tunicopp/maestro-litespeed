@@ -50,9 +50,6 @@ ensure_htaccess() {
 <IfModule mod_rewrite.c>
 RewriteEngine On
 RewriteRule .* - [E=HTTP_AUTHORIZATION:%{HTTP:Authorization}]
-# ✅ Libera ACME challenge antes de qualquer rewrite
-RewriteRule ^\.well-known/acme-challenge/ - [L]
-
 RewriteBase /
 RewriteRule ^index\.php$ - [L]
 # add a trailing slash to /wp-admin
@@ -66,11 +63,6 @@ RewriteRule . /index.php [L]
 EOL
     cat "$WP_PATH/.htaccess" >> /tmp/.htaccess_wp
     mv /tmp/.htaccess_wp "$WP_PATH/.htaccess"
-  else
-    # Garante a regra do ACME se o bloco já existir
-    if ! grep -q "\.well-known/acme-challenge" "$WP_PATH/.htaccess"; then
-      sed -i "s/RewriteRule \^\.\* - \[E=HTTP_AUTHORIZATION:%{HTTP:Authorization}\]/RewriteRule .* - [E=HTTP_AUTHORIZATION:%{HTTP:Authorization}]\nRewriteRule ^\\.well-known\\/acme-challenge\\/ - [L]/" "$WP_PATH/.htaccess"
-    fi
   fi
 }
 
@@ -84,6 +76,8 @@ apply_config_extras() {
   IFS=';' read -ra DEFINES <<< "$WORDPRESS_CONFIG_EXTRA"
   for item in "${DEFINES[@]}"; do
     [[ -z "$item" ]] && continue
+
+    # Evita forçar MULTISITE/SUBDOMAIN_INSTALL por EXTRA; deixamos o script garantir isso
     if echo "$item" | grep -qi "define('MULTISITE'"; then continue; fi
     if echo "$item" | grep -qi "define('SUBDOMAIN_INSTALL'"; then continue; fi
 
@@ -125,25 +119,30 @@ add_dynamic_urls_block() {
   fi
 }
 
+# --- NOVO: garante que a rede exista de fato quando o config pede multisite
 ensure_multisite() {
   local WP_PATH="$1"
   local PREFIX="${WORDPRESS_TABLE_PREFIX:-wp_}"
 
+  # Checa se o WP acha que é multisite
   local IS_MS
   IS_MS=$(wp eval 'echo (int) is_multisite();' --allow-root --path="$WP_PATH" || echo 0)
 
+  # Checa tabelas essenciais
   local HAS_BLOGS HAS_SITE
   HAS_BLOGS=$(wp db query --skip-column-names "SHOW TABLES LIKE '${PREFIX}blogs';" --allow-root --path="$WP_PATH" || true)
   HAS_SITE=$(wp db query --skip-column-names "SHOW TABLES LIKE '${PREFIX}site';"  --allow-root --path="$WP_PATH" || true)
 
   if [ "$IS_MS" -eq 1 ] && { [ -z "$HAS_BLOGS" ] || [ -z "$HAS_SITE" ]; }; then
     echo "🧩 Detectado MULTISITE sem tabelas de rede. Executando multisite-convert..."
+    # Define modo (subdomínios ou subdiretórios) se quiser via env
     local SUBDOMAIN=${SUBDOMAIN_INSTALL:-true}
     wp core multisite-convert \
       --title="${NETWORK_TITLE:-Maestro Ecommerce Network}" \
       $( [ "$SUBDOMAIN" = "true" ] && echo --subdomains ) \
       --allow-root --path="$WP_PATH" || true
 
+    # 🔐 garante os defines no wp-config.php
     wp config set MULTISITE true --raw --path="$WP_PATH" --allow-root
     wp config set SUBDOMAIN_INSTALL ${SUBDOMAIN_INSTALL:-true} --raw --path="$WP_PATH" --allow-root
 
@@ -152,10 +151,66 @@ ensure_multisite() {
   fi
 }
 
+# ———————— SSL/Certbot: configurar listener e recarregar quando necessário ————————
+configure_ssl_listener() {
+  local DOMAIN="${DOMAIN}"
+  local CERT_DIR="/etc/letsencrypt/live/${DOMAIN}"
+  local HTTPD_CONF="/usr/local/lsws/conf/httpd_config.conf"
+
+  [ -d "$CERT_DIR" ] || { echo "🔎 Certificados ainda não presentes em $CERT_DIR"; return 0; }
+  [ -f "${CERT_DIR}/fullchain.pem" ] && [ -f "${CERT_DIR}/privkey.pem" ] || { echo "⚠️ Cert incompleto em $CERT_DIR"; return 0; }
+
+  if ! grep -q "listener SSL" "$HTTPD_CONF"; then
+    echo "🧩 Criando listener SSL no OpenLiteSpeed..."
+    cat >> "$HTTPD_CONF" <<EOF
+
+listener SSL {
+  address                 *:443
+  secure                  1
+  keyFile                 /etc/letsencrypt/live/reusclub.com.br/privkey.pem
+  certFile                /etc/letsencrypt/live/reusclub.com.br/fullchain.pem
+}
+
+listener SSLmap {
+  address                 *:443
+  secure                  1
+  map                     wordpress reusclub.com.br
+  map                     wordpress www.reusclub.com.br
+}
+
+EOF
+    /usr/local/lsws/bin/lswsctrl reload || true
+  else
+    echo "🔁 Listener SSL já existe; garantindo paths atualizados..."
+    sed -i "s|keyFile.*|keyFile                 ${CERT_DIR}/privkey.pem|g" "$HTTPD_CONF"
+    sed -i "s|certFile.*|certFile               ${CERT_DIR}/fullchain.pem|g" "$HTTPD_CONF"
+    /usr/local/lsws/bin/lswsctrl reload || true
+  fi
+}
+
+watch_certs_and_reload() {
+  local CERT="${DOMAIN:-example.com}"
+  local CERT_FILE="/etc/letsencrypt/live/${CERT}/fullchain.pem"
+  local LAST_MTIME=""
+
+  while :; do
+    if [ -f "$CERT_FILE" ]; then
+      configure_ssl_listener
+      MTIME=$(stat -c %Y "$CERT_FILE" 2>/dev/null || echo "")
+      if [ -n "$MTIME" ] && [ "$MTIME" != "$LAST_MTIME" ]; then
+        echo "🔔 Detectada alteração no certificado (${CERT}); recarregando OLS..."
+        /usr/local/lsws/bin/lswsctrl reload || true
+        LAST_MTIME="$MTIME"
+      fi
+    fi
+    sleep 600  # verifica a cada 10 minutos
+  done
+}
+
 bootstrap_wordpress() {
   local WP_PATH="$1"
 
-  echo "📥 Baixando WordPress pt_BR (primeira execução)..."
+  echo "📥 Baixando WordPress (primeira execução)..."
   curl -fSL -o /tmp/latest.tar.gz https://pt-br.wordpress.org/latest-pt_BR.tar.gz
   tar -xzf /tmp/latest.tar.gz -C /tmp
   rsync -a /tmp/wordpress/ "$WP_PATH/"
@@ -192,6 +247,7 @@ bootstrap_wordpress() {
     $( [ "${SUBDOMAIN_INSTALL:-true}" = "true" ] && echo --subdomains ) \
     --allow-root --path="$WP_PATH" || true
 
+  # 🔐 garante os defines no wp-config.php
   wp config set MULTISITE true --raw --path="$WP_PATH" --allow-root
   wp config set SUBDOMAIN_INSTALL ${SUBDOMAIN_INSTALL:-true} --raw --path="$WP_PATH" --allow-root
   wp config set DOMAIN_CURRENT_SITE "${DOMAIN_CURRENT_SITE:-$(wp option get siteurl --allow-root --path="$WP_PATH" | sed -E 's#^https?://##')}" --path="$WP_PATH" --allow-root
@@ -202,61 +258,10 @@ bootstrap_wordpress() {
   ensure_htaccess "$WP_PATH"
 }
 
-# ———————— SSL/Certbot: configurar listener e recarregar quando necessário ————————
-configure_ssl_listener() {
-  local DOMAIN="${DOMAIN}"
-  local CERT_DIR="/etc/letsencrypt/live/${DOMAIN}"
-  local HTTPD_CONF="/usr/local/lsws/conf/httpd_config.conf"
-
-  [ -d "$CERT_DIR" ] || { echo "🔎 Certificados ainda não presentes em $CERT_DIR"; return 0; }
-  [ -f "${CERT_DIR}/fullchain.pem" ] && [ -f "${CERT_DIR}/privkey.pem" ] || { echo "⚠️ Cert incompleto em $CERT_DIR"; return 0; }
-
-  if ! grep -q "listener SSL" "$HTTPD_CONF"; then
-    echo "🧩 Criando listener SSL no OpenLiteSpeed..."
-    cat >> "$HTTPD_CONF" <<EOF
-
-listener SSL {
-  address                 *:443
-  secure                  1
-  keyFile                 ${CERT_DIR}/privkey.pem
-  certFile                ${CERT_DIR}/fullchain.pem
-}
-listener SSLmap {
-  address                 *:443
-  secure                  1
-  map                     Example *
-}
-EOF
-    /usr/local/lsws/bin/lswsctrl reload || true
-  else
-    echo "🔁 Listener SSL já existe; garantindo paths atualizados..."
-    sed -i "s|keyFile.*|keyFile                 ${CERT_DIR}/privkey.pem|g" "$HTTPD_CONF"
-    sed -i "s|certFile.*|certFile               ${CERT_DIR}/fullchain.pem|g" "$HTTPD_CONF"
-    /usr/local/lsws/bin/lswsctrl reload || true
-  fi
-}
-
-watch_certs_and_reload() {
-  local CERT="${DOMAIN:-example.com}"
-  local CERT_FILE="/etc/letsencrypt/live/${CERT}/fullchain.pem"
-  local LAST_MTIME=""
-
-  while :; do
-    if [ -f "$CERT_FILE" ]; then
-      configure_ssl_listener
-      MTIME=$(stat -c %Y "$CERT_FILE" 2>/dev/null || echo "")
-      if [ -n "$MTIME" ] && [ "$MTIME" != "$LAST_MTIME" ]; then
-        echo "🔔 Detectada alteração no certificado (${CERT}); recarregando OLS..."
-        /usr/local/lsws/bin/lswsctrl reload || true
-        LAST_MTIME="$MTIME"
-      fi
-    fi
-    sleep 600  # verifica a cada 10 minutos
-  done
-}
-
 # ========== Execução ==========
-[ "$WORDPRESS_DB_HOST" != "rds-endpoint" ] && wait_for_db
+if [ "$WORDPRESS_DB_HOST" != "rds-endpoint" ]; then
+  wait_for_db
+fi
 
 WP_PATH="/var/www/vhosts/localhost/html"
 
@@ -277,7 +282,7 @@ if wp core is-installed --path="$WP_PATH" --allow-root 2>/dev/null; then
   apply_config_extras "$WP_PATH"
   add_dynamic_urls_block "$WP_PATH"
   ensure_htaccess "$WP_PATH"
-  ensure_multisite "$WP_PATH"
+  ensure_multisite "$WP_PATH"   # <- NOVO: garante tabelas da rede
 else
   if [ ! -f "$WP_PATH/wp-config.php" ]; then
     bootstrap_wordpress "$WP_PATH"
@@ -299,14 +304,14 @@ else
   fi
 fi
 
-# Ajustes de PHP (ini) — corrigido para lsphp81
-echo "⚙️ Forçando alterações diretamente no php.ini (lsphp81)..."
-PHP_INI="/usr/local/lsws/lsphp81/etc/php/8.1/litespeed/php.ini"
+# Ajustes de PHP (ini)
+echo "⚙️ Forçando alterações diretamente no php.ini (lsphp82)..."
+PHP_INI="/usr/local/lsws/lsphp82/etc/php/8.2/litespeed/php.ini"
 update_or_append() { local key="$1"; local value="$2";
-  if [ -f "$PHP_INI" ] && grep -q "^$key" "$PHP_INI" 2>/dev/null; then
+  if grep -q "^$key" "$PHP_INI" 2>/dev/null; then
     echo "🔁 Atualizando $key..."; sed -i "s|^$key.*|$key = $value|" "$PHP_INI"
   else
-    [ -f "$PHP_INI" ] && { echo "➕ Adicionando $key..."; echo "$key = $value" >> "$PHP_INI"; } || echo "❌ php.ini não encontrado em $PHP_INI"
+    echo "➕ Adicionando $key..."; echo "$key = $value" >> "$PHP_INI"
   fi
 }
 if [ -f "$PHP_INI" ]; then
@@ -332,6 +337,8 @@ if [ -f "$PHP_INI" ]; then
   update_or_append "display_errors" "Off"
   update_or_append "log_errors" "On"
   echo "✅ Configurações aplicadas com sucesso em $PHP_INI"
+else
+  echo "❌ Arquivo php.ini não encontrado: $PHP_INI"
 fi
 
 # Redis plugin
@@ -347,9 +354,5 @@ chown -R nobody:nogroup "$WP_PATH" || true
 chmod -R 775 "$WP_PATH/wp-content" || true
 mkdir -p "$WP_PATH/wp-content/uploads" && chown -R nobody:nogroup "$WP_PATH/wp-content/uploads" && chmod -R 775 "$WP_PATH/wp-content/uploads"
 
-# Inicia o OLS e ativa o watcher de certificados
 /usr/local/lsws/bin/lswsctrl start
-configure_ssl_listener
-watch_certs_and_reload &
-
 tail -f /usr/local/lsws/logs/error.log

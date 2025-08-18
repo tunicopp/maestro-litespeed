@@ -1,3 +1,8 @@
+### 🗓️ Alteração em 18/08/2025 16:59:04
+- .env
+- docker-compose.yml
+- entrypoint.sh
+
 ### 🗓️ Alteração em 18/08/2025 16:34:41
 - .env
 - docker-compose.yml

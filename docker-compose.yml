@@ -1,105 +1,88 @@
-version: "3.9"
+name: wordpress-litespeed
+
+networks:
+  wp_network:
+
+volumes:
+  wp_maestro:
+  wp_maestro_cache:
+  mariadb_data:
+  redis_data:
 
 services:
   litespeed:
-    image: litespeedtech/openlitespeed:1.7.17-lsphp81
+    build: 
+      context: .
+      dockerfile: Dockerfile
     container_name: litespeed
-    depends_on:
-      - mariadb
-      - redis
+    env_file: .env
+    environment:
+      - LSWS_ADMIN_USER=${LSWS_ADMIN_USER}
+      - LSWS_ADMIN_PASS=${LSWS_ADMIN_PASS}
     ports:
+      - "8080:80"
       - "80:80"
       - "443:443"
-    env_file: ./.env
+      - "7080:7080"
     volumes:
-      # WordPress
-      - wp:/var/www/vhosts/localhost/html
-      # Config do OLS persistente
-      - lsws-conf:/usr/local/lsws/conf
-      # Certificados Let’s Encrypt compartilhados
-      - letsencrypt:/etc/letsencrypt
-      # Seu entrypoint custom
-      - ./entrypoint.sh:/usr/local/bin/entrypoint.sh:ro
-    command: [ "bash", "/usr/local/bin/entrypoint.sh" ]
-    restart: unless-stopped
+      - wp_maestro:/var/www/vhosts/localhost/html
+      - lsws-conf:/usr/local/lsws/conf # Config do OLS persistente
+      - letsencrypt:/etc/letsencrypt # Certificados Let’s Encrypt compartilhados
+      - ./wordpress/wp-content/cache:/var/www/vhosts/localhost/html/wp-content/cache
+    depends_on:
+      - redis
+    networks:
+      - wp_network
+    profiles: ["dev", "prod"]
 
   mariadb:
     image: mariadb:10.11
     container_name: mariadb
-    env_file: ./.env
+    env_file: .env
     environment:
-      - MYSQL_DATABASE=${WORDPRESS_DB_NAME}
-      - MYSQL_USER=${WORDPRESS_DB_USER}
-      - MYSQL_PASSWORD=${WORDPRESS_DB_PASSWORD}
-      - MYSQL_ROOT_PASSWORD=${WORDPRESS_DB_PASSWORD}
+      MYSQL_ROOT_PASSWORD: ${WORDPRESS_DB_PASSWORD}
+      MYSQL_DATABASE: ${WORDPRESS_DB_NAME}
+      MYSQL_USER: ${WORDPRESS_DB_USER}
+      MYSQL_PASSWORD: ${WORDPRESS_DB_PASSWORD}
     volumes:
-      - mariadb-data:/var/lib/mysql
-    restart: unless-stopped
+      - mariadb_data:/var/lib/mysql
+    networks:
+      - wp_network
+    profiles: ["dev"]
 
   redis:
-    image: redis:7-alpine
+    image: redis:alpine
     container_name: redis
-    command: ["redis-server","--appendonly","yes","--requirepass","${WP_REDIS_PASSWORD}"]
+    env_file: .env
+    command: ["redis-server", "--appendonly", "yes", "--requirepass", "${WP_REDIS_PASSWORD}"]
+    environment:
+      REDIS_PASSWORD: ${WP_REDIS_PASSWORD}
     volumes:
-      - redis-data:/data
-    restart: unless-stopped
+      - redis_data:/data
+    networks:
+      - wp_network
+    profiles: ["dev", "prod"]
 
-  # ——— Certbot via HTTP-01 (webroot) ———
-  certbot:
-    image: certbot/certbot:latest
-    container_name: certbot
+  # ——— ALTERNATIVA: Certbot DNS-01 p/ WILDCARD (exemplo Cloudflare) ———
+  certbot-dns:
+    image: certbot/dns-cloudflare:latest
+    container_name: certbot-dns
     env_file: ./.env
-    depends_on:
-      - litespeed
+    environment:
+      - CLOUDFLARE_API_TOKEN=${CLOUDFLARE_API_TOKEN}
     volumes:
-      # O token do ACME vai ser gravado e servido pelo OLS (webroot)
-      - wp:/var/www/vhosts/localhost/html:rw
-      # Onde ficam os certificados emitidos/renovados
       - letsencrypt:/etc/letsencrypt
+      - ./cloudflare.ini:/root/.secrets/certbot/cloudflare.ini:ro
     entrypoint: /bin/sh
     command: |
       sh -c '
-        set -e
-        echo "➡️ Emitindo/renovando certificados (HTTP-01 via webroot)..."
-        certbot certonly --webroot \
-          -w /var/www/vhosts/localhost/html \
-          -d ${DOMAIN} ${EXTRA_DOMAINS} \
-          --email ${LE_EMAIL} --agree-tos --non-interactive --keep-until-expiring
-
-        echo "🔁 Iniciando loop de renovação (12h)..."
+        set -e;
+        certbot certonly --dns-cloudflare --dns-cloudflare-credentials /root/.secrets/certbot/cloudflare.ini \
+          -d ${DOMAIN} -d *.${DOMAIN} \
+          --email ${LE_EMAIL} --agree-tos --non-interactive --keep-until-expiring;
         while :; do
-          certbot renew --webroot -w /var/www/vhosts/localhost/html --quiet || true
-          sleep 12h
+          certbot renew --quiet;
+          sleep 12h;
         done
       '
     restart: unless-stopped
-
-  # ——— ALTERNATIVA: Certbot DNS-01 p/ WILDCARD (exemplo Cloudflare) ———
-  # certbot-dns:
-  #   image: certbot/dns-cloudflare:latest
-  #   container_name: certbot-dns
-  #   env_file: ./.env
-  #   environment:
-  #     - CLOUDFLARE_API_TOKEN=${CLOUDFLARE_API_TOKEN}
-  #   volumes:
-  #     - letsencrypt:/etc/letsencrypt
-  #     - ./cloudflare.ini:/root/.secrets/certbot/cloudflare.ini:ro
-  #   entrypoint: /bin/sh
-  #   command: -c "
-  #     set -e;
-  #     certbot certonly --dns-cloudflare --dns-cloudflare-credentials /root/.secrets/certbot/cloudflare.ini \
-  #       -d ${DOMAIN} -d *.${DOMAIN} \
-  #       --email ${LE_EMAIL} --agree-tos --non-interactive --keep-until-expiring;
-  #     while :; do
-  #       certbot renew --quiet;
-  #       sleep 12h;
-  #     done
-  #   "
-  #   restart: unless-stopped
-
-volumes:
-  wp:
-  mariadb-data:
-  redis-data:
-  lsws-conf:
-  letsencrypt:
